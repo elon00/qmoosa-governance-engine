@@ -1,0 +1,33 @@
+{
+  "name": "@qmoosa/governance-engine",
+  "version": "1.0.0",
+  "description": "QMOOSA Governance Engine — Proposal State Machine, Checkpointed Voter Ledger, Timelock Queue & Guardian Controls",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test tests/engine.test.mjs",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "typescript": "^5.4.5"
+  },
+  "keywords": [
+    "qmoosa",
+    "governance",
+    "engine",
+    "state-machine",
+    "timelock",
+    "voting",
+    "checkpoints",
+    "defi"
+  ],
+  "author": "elon00",
+  "license": "MIT"
+}
