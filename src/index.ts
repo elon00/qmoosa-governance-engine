@@ -65,6 +65,8 @@ export interface GovernanceEngineConfig {
   readonly timelockDelay: number; // in seconds
   readonly gracePeriod: number; // in seconds
   readonly guardianAddress: string;
+  readonly guardianSigners?: readonly string[];
+  readonly guardianThreshold?: number;
 }
 
 export const DEFAULT_ENGINE_CONFIG: Readonly<GovernanceEngineConfig> = Object.freeze({
@@ -75,7 +77,9 @@ export const DEFAULT_ENGINE_CONFIG: Readonly<GovernanceEngineConfig> = Object.fr
   quorumDenominator: 100n,
   timelockDelay: 86400,
   gracePeriod: 14 * 86400,
-  guardianAddress: '0x8888888888888888888888888888888888888888'
+  guardianAddress: '0x8888888888888888888888888888888888888888',
+  guardianSigners: ['0x8888888888888888888888888888888888888888'],
+  guardianThreshold: 1
 });
 
 export class GovernanceEngine {
@@ -83,6 +87,11 @@ export class GovernanceEngine {
   private readonly proposals: Map<string, Proposal> = new Map();
   private readonly checkpoints: Map<string, VoterCheckpoint[]> = new Map();
   private readonly totalSupplyCheckpoints: VoterCheckpoint[] = [];
+  private readonly guardianSigners: Set<string> = new Set();
+  private readonly guardianThreshold: number;
+  private readonly pauseVotes: Set<string> = new Set();
+  private readonly unpauseVotes: Set<string> = new Set();
+  private readonly vetoVotes: Map<string, Set<string>> = new Map();
   private proposalSequence = 0;
   private paused = false;
   private pausedAt = 0;
@@ -93,6 +102,19 @@ export class GovernanceEngine {
       ...DEFAULT_ENGINE_CONFIG,
       ...config
     });
+
+    const signers = this.config.guardianSigners && this.config.guardianSigners.length > 0
+      ? this.config.guardianSigners
+      : [this.config.guardianAddress];
+
+    for (const s of signers) {
+      this.guardianSigners.add(s.toLowerCase());
+    }
+
+    this.guardianThreshold = this.config.guardianThreshold ?? 1;
+    if (this.guardianThreshold <= 0 || this.guardianThreshold > this.guardianSigners.size) {
+      throw new Error('INVALID_GUARDIAN_THRESHOLD');
+    }
   }
 
   public recordVotingPower(voter: string, blockNumber: number, votes: bigint): void {
@@ -152,26 +174,45 @@ export class GovernanceEngine {
     return checkpoints[lower].votes;
   }
 
-  public pause(by: string, currentTime: number): void {
-    if (by.toLowerCase() !== this.config.guardianAddress.toLowerCase()) {
+  public pause(by: string, currentTime: number): { paused: boolean; votes: number } {
+    if (!this.guardianSigners.has(by.toLowerCase())) {
       throw new Error('UNAUTHORIZED_GUARDIAN');
     }
     if (this.isPaused(currentTime)) {
       throw new Error('ALREADY_PAUSED');
     }
-    this.paused = true;
-    this.pausedAt = currentTime;
+    if (this.pauseVotes.has(by.toLowerCase())) {
+      throw new Error('ALREADY_VOTED');
+    }
+    this.pauseVotes.add(by.toLowerCase());
+    if (this.pauseVotes.size >= this.guardianThreshold) {
+      this.paused = true;
+      this.pausedAt = currentTime;
+      this.pauseVotes.clear();
+      this.unpauseVotes.clear();
+    }
+    return { paused: this.paused, votes: this.pauseVotes.size };
   }
 
-  public unpause(by: string): void {
-    if (by.toLowerCase() !== this.config.guardianAddress.toLowerCase()) {
+  public unpause(by: string): { unpaused: boolean; votes: number } {
+    if (!this.guardianSigners.has(by.toLowerCase())) {
       throw new Error('UNAUTHORIZED_GUARDIAN');
     }
     if (!this.paused) {
       throw new Error('NOT_PAUSED');
     }
-    this.paused = false;
-    this.pausedAt = 0;
+    if (this.unpauseVotes.has(by.toLowerCase())) {
+      throw new Error('ALREADY_VOTED');
+    }
+    this.unpauseVotes.add(by.toLowerCase());
+    if (this.unpauseVotes.size >= this.guardianThreshold) {
+      this.paused = false;
+      this.pausedAt = 0;
+      this.pauseVotes.clear();
+      this.unpauseVotes.clear();
+      return { unpaused: true, votes: this.unpauseVotes.size };
+    }
+    return { unpaused: false, votes: this.unpauseVotes.size };
   }
 
   public isPaused(currentTime: number): boolean {
@@ -182,8 +223,8 @@ export class GovernanceEngine {
     return true;
   }
 
-  public vetoProposal(proposalId: string, by: string, reason: string): void {
-    if (by.toLowerCase() !== this.config.guardianAddress.toLowerCase()) {
+  public vetoProposal(proposalId: string, by: string, reason: string): { vetoed: boolean; votes: number } {
+    if (!this.guardianSigners.has(by.toLowerCase())) {
       throw new Error('UNAUTHORIZED_GUARDIAN');
     }
     const proposal = this.proposals.get(proposalId);
@@ -193,8 +234,23 @@ export class GovernanceEngine {
     if (proposal.executed) {
       throw new Error('CANNOT_VETO_EXECUTED_PROPOSAL');
     }
-    proposal.vetoed = true;
-    proposal.vetoReason = reason;
+
+    let votes = this.vetoVotes.get(proposalId);
+    if (!votes) {
+      votes = new Set();
+      this.vetoVotes.set(proposalId, votes);
+    }
+    if (votes.has(by.toLowerCase())) {
+      throw new Error('ALREADY_VOTED');
+    }
+    votes.add(by.toLowerCase());
+
+    if (votes.size >= this.guardianThreshold) {
+      proposal.vetoed = true;
+      proposal.vetoReason = reason;
+      return { vetoed: true, votes: votes.size };
+    }
+    return { vetoed: false, votes: votes.size };
   }
 
   public createProposal(params: {

@@ -250,3 +250,72 @@ test('Governance Engine: Defensive Immutability & Deep Freezing', () => {
     prop.canceled = true;
   });
 });
+
+test('Governance Engine: M-of-N Multi-Signature Emergency Guardian Threshold', () => {
+  const G1 = '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  const G2 = '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+  const G3 = '0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+  const ROGUE = '0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD';
+
+  const engine = new GovernanceEngine({
+    votingDelay: 1,
+    votingPeriod: 10,
+    proposalThreshold: 100_000n * 10n ** 18n,
+    guardianSigners: [G1, G2, G3],
+    guardianThreshold: 2
+  });
+
+  engine.recordTotalSupply(1, 10_000_000n * 10n ** 18n);
+  engine.recordVotingPower(PROPOSER, 1, 500_000n * 10n ** 18n);
+
+  const proposalId = engine.createProposal({
+    proposer: PROPOSER,
+    description: 'Suspicious payload proposal',
+    actions: [{ target: '0xTarget', value: 0n, signature: 'transferAll()', calldata: '0x' }],
+    currentBlock: 10,
+    currentTime: 1000
+  });
+
+  // Unauthorized signer fails
+  assert.throws(() => engine.pause(ROGUE, 1000), /UNAUTHORIZED_GUARDIAN/);
+  assert.throws(() => engine.vetoProposal(proposalId, ROGUE, 'hack'), /UNAUTHORIZED_GUARDIAN/);
+
+  // Veto threshold testing: 2-of-3
+  const v1 = engine.vetoProposal(proposalId, G1, 'Potential attack');
+  assert.equal(v1.vetoed, false);
+  assert.equal(v1.votes, 1);
+  assert.equal(engine.getProposalState(proposalId, 12, 1000), ProposalState.Active);
+
+  // Duplicate vote fails
+  assert.throws(() => engine.vetoProposal(proposalId, G1, 'duplicate'), /ALREADY_VOTED/);
+
+  // Second signer reaches threshold
+  const v2 = engine.vetoProposal(proposalId, G2, 'Confirmed exploit pattern');
+  assert.equal(v2.vetoed, true);
+  assert.equal(v2.votes, 2);
+  assert.equal(engine.getProposalState(proposalId, 12, 1000), ProposalState.Vetoed);
+
+  // Multi-sig pause: 2-of-3
+  const p1 = engine.pause(G1, 1000);
+  assert.equal(p1.paused, false);
+  assert.equal(p1.votes, 1);
+  assert.equal(engine.isPaused(1000), false);
+
+  assert.throws(() => engine.pause(G1, 1000), /ALREADY_VOTED/);
+
+  const p2 = engine.pause(G3, 1000);
+  assert.equal(p2.paused, true);
+  assert.equal(engine.isPaused(1000), true);
+
+  // Multi-sig unpause: 2-of-3
+  const u1 = engine.unpause(G2);
+  assert.equal(u1.unpaused, false);
+  assert.equal(u1.votes, 1);
+  assert.equal(engine.isPaused(1000), true);
+
+  assert.throws(() => engine.unpause(G2), /ALREADY_VOTED/);
+
+  const u2 = engine.unpause(G3);
+  assert.equal(u2.unpaused, true);
+  assert.equal(engine.isPaused(1000), false);
+});
